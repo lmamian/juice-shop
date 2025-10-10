@@ -1,0 +1,112 @@
+name: "CodeQL + Dependabot SARIF"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  codeql-combined:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+
+    steps:
+      # 1. Clonar el repositorio
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. Configurar Python para el script
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      # 3. Inicializar CodeQL
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: python   # Cambia según tu proyecto
+
+      # 4. Ejecutar análisis CodeQL
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+        with:
+          output: results.codeql.sarif  # archivo local para combinar
+
+      # 5. Instalar requests (para la llamada a la API de Dependabot)
+      - name: Install requests
+        run: python -m ensurepip && python -m pip install requests
+
+      # 6. Script para combinar Dependabot + CodeQL en un SARIF
+      - name: Combine Dependabot + CodeQL SARIF
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          python << 'EOF'
+          import json
+          import urllib.request
+          import ssl
+          import os
+
+          token = os.environ["GITHUB_TOKEN"]
+          owner = os.environ["OWNER"]
+          repo = os.environ["REPO"]
+
+          ssl_context = ssl._create_unverified_context()
+
+          # Función para llamar a la API de GitHub
+          def github_api_request(url, token):
+              req = urllib.request.Request(url)
+              req.add_header("Authorization", f"token {token}")
+              req.add_header("Accept", "application/vnd.github+json")
+              with urllib.request.urlopen(req, context=ssl_context) as resp:
+                  return json.loads(resp.read().decode())
+
+          # Obtener alertas de Dependabot
+          alerts = []
+          page = 1
+          while True:
+              url = f"https://api.github.com/repos/{owner}/{repo}/dependabot/alerts?per_page=100&page={page}"
+              data = github_api_request(url, token)
+              if not data:
+                  break
+              alerts.extend(data)
+              page += 1
+
+          # Convertir Dependabot a SARIF
+          dep_results = []
+          for alert in alerts:
+              advisory = alert.get("security_advisory", {})
+              package = advisory.get("package", {})
+              dep_results.append({
+                  "ruleId": package.get("name", "N/A"),
+                  "level": advisory.get("severity", "warning"),
+                  "message": {"text": f"Dependabot alert: {package.get('name', 'N/A')}"},
+                  "locations": [{"physicalLocation": {"artifactLocation": {"uri": "N/A"}, "region": {"startLine": 0}}}]
+              })
+
+          # Cargar CodeQL SARIF
+          with open("results.codeql.sarif", "r", encoding="utf-8") as f:
+              codeql_sarif = json.load(f)
+
+          # Combinar resultados
+          codeql_sarif["runs"][0]["results"].extend(dep_results)
+
+          # Guardar SARIF combinado
+          combined_file = "combined_alerts.sarif"
+          with open(combined_file, "w", encoding="utf-8") as f:
+              json.dump(codeql_sarif, f, indent=2)
+
+          print(f"Combined SARIF saved as {combined_file}")
+          EOF
+
+      # 7. Subir el SARIF combinado a GitHub con categoría única
+      - name: Upload Combined SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: combined_alerts.sarif
+          category: combined-security-alerts
