@@ -1,0 +1,20 @@
+name: SOOS SAST Analysis
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  soos_sast_scan:
+    name: SOOS SAST Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+      - name: Run SOOS SAST Scan
+        uses: soos-io/soos-sast-github-action@v1
+        with:
+          client_id: ${{ secrets.SOOS_CLIENT_ID }}
+          api_key: ${{ secrets.SOOS_API_KEY }}
+          export_format: Sarif
+          project_name: "soos-sarif-project"
